@@ -318,6 +318,24 @@ static void test_json_and_wire() {
     CHECK_EQ(d.cwd, std::string("/tmp/with tab"));
 }
 
+static void test_auto_compact_between_turns_keeps_state() {
+    Tracker t;
+    t.roll_day(20261107, 0);
+    t.on_event(ev("SessionStart", "a", 0, "startup"), 1000);
+    t.on_event(ev("UserPromptSubmit", "a"), 2000);
+    t.on_event(ev("Stop", "a"), 5000);
+    // Claude Code auto-compacts after the turn ended: no Stop follows.
+    t.on_event(ev("PreCompact", "a", 0, "auto"), 6000);
+    t.on_event(ev("PostCompact", "a", 0, "auto"), 56000);
+    CHECK(find(t, "a")->state == SessState::Waiting);
+    CHECK(find(t, "a")->wait == WaitKind::TurnEnd);
+    // mid-turn auto compaction stays Working
+    t.on_event(ev("UserPromptSubmit", "a"), 60000);
+    t.on_event(ev("PreCompact", "a", 0, "auto"), 61000);
+    t.on_event(ev("PostCompact", "a", 0, "auto"), 90000);
+    CHECK(find(t, "a")->state == SessState::Working);
+}
+
 int main() {
     test_basic_lifecycle();
     test_timers_follow_sessions_when_slots_shift();
@@ -333,6 +351,7 @@ int main() {
     test_persistence_roundtrip();
     test_format_and_frames_parse_on_device();
     test_screensaver();
+    test_auto_compact_between_turns_keeps_state();
     test_json_and_wire();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

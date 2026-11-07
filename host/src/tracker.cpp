@@ -162,9 +162,11 @@ void Tracker::on_event(const HookEvent& ev, int64_t now, uint64_t pid_start) {
         if (ev.detail == "manual") {
             // /compact typed by the user: busy while it runs, then back to them
             transition(s, n == "PreCompact" ? SessState::Working : SessState::Idle, WaitKind::None, now);
-        } else {
-            activity();
         }
+        // Auto compaction is housekeeping, not work. Mid-turn the session is
+        // already Working; after a turn has ended (Claude Code also compacts
+        // then) no Stop follows, so treating it as activity would leave the
+        // session stuck on cyan. Keep whatever state it was in.
     } else if (n == "SubagentStart" || n == "SubagentStop" || n == "PostToolBatch" || n == "ElicitationResult") {
         activity();
     }
