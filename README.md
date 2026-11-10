@@ -69,6 +69,49 @@ agent-indicator raw B 50  # send a device command through the daemon (here: brig
 Config: `~/.config/agent-indicator/config` (brightness, current cap, timeouts, panel pages).
 State/logs: `~/.local/state/agent-indicator/`; Linux logs: `journalctl --user -u agent-indicator`.
 
+## Claude Code on other machines (SSH)
+
+Every daemon also **broadcasts** its own sessions once per second on `127.0.0.1:47291`, for any
+number of listeners. The feed carries only states, timers and today's counters, with no paths,
+prompts or session ids. A daemon with the indicator attached merges every feed it can reach (default
+`remotes = 47292`) after its own sessions. The bar shows local sessions first, then remote ones; the
+panels count both.
+
+To show a server's sessions on your indicator:
+
+1. **Server** (where `claude` runs): `./install.sh` as usual. A device isn't needed there; the daemon
+   runs fine without one, and the hooks start it if no service does.
+2. **Your machine** (indicator attached): add one line to the server's entry in `~/.ssh/config`:
+
+   ```
+   Host devbox
+       LocalForward 47292 127.0.0.1:47291
+       # optional: every terminal shares one connection, so the feed survives
+       # closing the first terminal
+       ControlMaster auto
+       ControlPath ~/.ssh/cm-%C
+       ControlPersist 10m
+   ```
+
+   Or once, by hand: `ssh -L 47292:127.0.0.1:47291 devbox`.
+
+That's all. Nothing needs restarting on either side. While an SSH session to the server is open,
+its sessions appear within about a second. When the connection closes they drop off after 5 s.
+Both daemons reconnect by themselves across reboots, sleep and network changes. For a second
+server, use another local port (`LocalForward 47293 127.0.0.1:47291`) and list it:
+`remotes = 47292, 47293`. `agent-indicator status` shows each feed and how many listeners this
+machine's broadcast has.
+
+Notes:
+- The broadcast port only listens on loopback, but on a shared server other local users could
+  connect to it. Set `broadcast_port = 0` to turn it off, or pick another port.
+- When the tunnel is up but the server's daemon isn't running, ssh prints
+  `channel N: open failed: connect failed` on each attempt. The indicator backs off to one attempt
+  a minute in that case.
+- A second plain `ssh` to the same server warns that port 47292 is already in use. That's harmless:
+  the first connection keeps carrying the feed. `ControlMaster` above avoids the warning.
+- Feeds are never re-broadcast, so two machines that forward to each other don't double count.
+
 ## Firmware
 
 ```sh

@@ -68,6 +68,18 @@ panel4 = sessions
 
 # Launch the daemon from the hook when no service is running it.
 autostart = true
+
+# --- Claude Code running on other machines over SSH -------------------------
+# Every daemon broadcasts its own sessions on 127.0.0.1:broadcast_port
+# (states and counters only; 0 turns it off). The daemon next to the
+# indicator also shows the feeds listed in `remotes`, merged after its own
+# sessions. Bring a feed here by adding one line to ~/.ssh/config on the
+# machine with the indicator:
+#   Host devbox
+#       LocalForward 47292 127.0.0.1:47291
+# Use another local port per extra server (47293, ...) and list it below.
+broadcast_port = 47291
+remotes = 47292
 )";
 }
 
@@ -105,6 +117,8 @@ Config Config::load(std::string* warnings) {
         else if (k == "turn_wait_to_idle_min") { tmp = 10; num(1, 24 * 60, tmp); c.tracker.turn_wait_to_idle_ms = tmp * 60'000LL; }
         else if (k == "error_hold_min") { tmp = 10; num(1, 24 * 60, tmp); c.tracker.error_hold_ms = tmp * 60'000LL; }
         else if (k == "crash_linger_s") { tmp = 120; num(1, 3600, tmp); c.tracker.crash_linger_ms = tmp * 1000LL; }
+        else if (k == "broadcast_port") num(0, 65535, c.broadcast_port);
+        else if (k == "remotes") c.remotes = split_list(v);
         else if (k == "autostart") c.autostart = (v == "true" || v == "1" || v == "yes");
         else if (k.size() == 6 && k.compare(0, 5, "panel") == 0 && k[5] >= '1' && k[5] <= '4')
             c.panels[(size_t)(k[5] - '1')] = split_list(v);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(agent_indicator_host VERSION 1.0.0 LANGUAGES CXX)
+project(agent_indicator_host VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,7 +13,8 @@ add_library(agentind_core STATIC
   src/tracker.cpp
   src/composer.cpp
   src/config.cpp
-  src/serial.cpp)
+  src/serial.cpp
+  src/feed.cpp)
 target_include_directories(agentind_core PUBLIC src)
 target_compile_options(agentind_core PRIVATE -Wall -Wextra)
 

@@ -4,6 +4,8 @@
 #include <string>
 
 #include "composer.hpp"
+#include "feed.hpp"
+#include <unistd.h>
 #include "config.hpp"
 #include "json.hpp"
 #include "tracker.hpp"
@@ -336,6 +338,75 @@ static void test_auto_compact_between_turns_keeps_state() {
     CHECK(find(t, "a")->state == SessState::Working);
 }
 
+static void test_remote_feed() {
+    // Server machine: one waiting session (12 s) and one working (streak 40 s).
+    Tracker srv;
+    srv.roll_day(20261110, 0);
+    srv.on_event(ev("UserPromptSubmit", "r1"), 0);
+    srv.on_event(ev("Stop", "r1"), 28'000);
+    srv.on_event(ev("UserPromptSubmit", "r2"), 0);
+    srv.on_event(ev("PreToolUse", "r2"), 30'000);
+    const std::string line = feed::encode(make_view(srv, 40'000), "devbox");
+    CHECK(line.find('\n') == std::string::npos);
+    CHECK(line.find("r1") == std::string::npos);   // no session ids leave the machine
+
+    View rv;
+    std::string host;
+    CHECK(feed::decode(line, rv, host));
+    CHECK_EQ(host, std::string("devbox"));
+    CHECK_EQ(rv.sessions.size(), (size_t)2);
+    CHECK(rv.sessions[0].state == SessState::Waiting && rv.sessions[0].wait == WaitKind::TurnEnd);
+    CHECK_EQ(rv.sessions[0].in_state_ms, (int64_t)12'000);
+    CHECK_EQ(rv.sessions[1].streak_ms, (int64_t)40'000);
+    CHECK_EQ(rv.day.tool_calls, (int64_t)1);
+    CHECK(!feed::decode("{\"v\":2,\"s\":[],\"d\":[0,0,0,0,0,0,0,0]}", rv, host));
+    CHECK(!feed::decode("F 1 A W 1:s:c", rv, host));
+    CHECK(!feed::decode("{\"v\":1,\"s\":[[\"Q\",\"\",0,0]],\"d\":[0,0,0,0,0,0,0,0]}", rv, host));
+
+    // Client machine: one local idle session; remote ones are appended to the bar
+    // and the longest wait is the remote's.
+    Tracker loc;
+    loc.roll_day(20261110, 0);
+    loc.on_event(ev("SessionStart", "l1"), 0);
+    View v = make_view(loc, 50'000);
+    feed::decode(line, rv, host);
+    merge_view(v, rv);
+    Config cfg;
+    Composer comp(cfg);
+    PanelText p[4];
+    std::string body = comp.compose(v, 0, p);   // beat 0: first page of each panel
+    CHECK(body.rfind("A IYW ", 0) == 0);
+    CHECK(p[0].token == "12:s:y");
+    CHECK(p[3].token == "3:n:x");
+    // A busy remote keeps the shared display out of the screensaver.
+    CHECK(!comp.screensaver(v));
+
+    // End to end over loopback: Server -> Remote.
+    feed::Server server;
+    int port = 0;
+    for (int cand = 47391; cand < 47400 && !port; ++cand)
+        if (server.listen(cand)) port = cand;
+    CHECK(port != 0);
+    feed::Remote remote(std::to_string(port));
+    int64_t now = 0;
+    for (int i = 0; i < 200 && !remote.live(now); ++i) {
+        remote.poll(now);
+        server.accept_pending();
+        if (server.clients()) server.publish(line);
+        usleep(2000);
+        now += 2;
+    }
+    CHECK(remote.live(now));
+    CHECK_EQ(remote.host(), std::string("devbox"));
+    CHECK_EQ(remote.view(now).sessions.size(), (size_t)2);
+    // Sessions age locally between updates and disappear when the feed stops.
+    CHECK(remote.view(now + 1000).sessions[0].in_state_ms >= 13'000);
+    server.close_all();
+    remote.poll(now + 6000);
+    CHECK(!remote.live(now + 6000));
+    CHECK(remote.view(now + 6000).sessions.empty());
+}
+
 int main() {
     test_basic_lifecycle();
     test_timers_follow_sessions_when_slots_shift();
@@ -352,6 +423,7 @@ int main() {
     test_format_and_frames_parse_on_device();
     test_screensaver();
     test_auto_compact_between_turns_keeps_state();
+    test_remote_feed();
     test_json_and_wire();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

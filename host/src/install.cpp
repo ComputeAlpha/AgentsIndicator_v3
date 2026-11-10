@@ -306,8 +306,8 @@ int cmd_status(int argc, char** argv) {
            num(t, "idles"), num(t, "tool_calls"), num(t, "actions_per_min"));
     const json::Value* s = v.find("sessions");
     printf("sessions: %zu\n", s && s->is_array() ? s->items().size() : 0);
+    int i = 0;
     if (s && s->is_array()) {
-        int i = 0;
         for (const auto& o : s->items()) {
             std::string st = o.get_string("state");
             if (!o.get_string("wait").empty()) st += "/" + o.get_string("wait");
@@ -316,6 +316,24 @@ int cmd_status(int argc, char** argv) {
                    fmt_ms(num(&o, "age_ms")).c_str(), num(&o, "pid"), o.get_string("cwd").c_str());
         }
     }
+    // Feeds from other machines (shown after the local sessions on the bar).
+    if (const json::Value* rs = v.find("remotes"); rs && rs->is_array()) {
+        for (const auto& r : rs->items()) {
+            const bool live = r.find("live") && r.find("live")->as_bool();
+            const json::Value* ss = r.find("sessions");
+            const size_t n = ss && ss->is_array() ? ss->items().size() : 0;
+            printf("remote %s (port %s): %s", r.get_string("host").c_str(), r.get_string("target").c_str(),
+                   live ? "" : "no feed (SSH forward not up, or no daemon on the far side)\n");
+            if (!live) continue;
+            printf("%zu session%s\n", n, n == 1 ? "" : "s");
+            for (const auto& o : ss->items()) {
+                std::string st = o.get_string("state");
+                if (!o.get_string("wait").empty()) st += "/" + o.get_string("wait");
+                printf("  %2d  %-22s %6s\n", ++i, st.c_str(), fmt_ms(num(&o, "in_state_ms")).c_str());
+            }
+        }
+    }
+    printf("broadcast: %lld listener%s\n", num(&v, "broadcast_clients"), num(&v, "broadcast_clients") == 1 ? "" : "s");
     return 0;
 }
 
