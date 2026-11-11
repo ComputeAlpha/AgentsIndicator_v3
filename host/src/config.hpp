@@ -12,6 +12,10 @@ struct Config {
     int screensaver_min = 30;         // nothing active this long -> starry night
     int panel_rotate_s = 5;           // pages alternate this often
     bool autostart = true;            // hook launches the daemon if it isn't running
+    // Session feed for indicators on other machines (127.0.0.1 only; 0 = off).
+    int broadcast_port = 47291;
+    // Feeds to show here, normally local ends of SSH forwards ("port" or "host:port").
+    std::vector<std::string> remotes = {"47292"};
     // One comma-separated page list per digit panel, left to right.
     std::vector<std::vector<std::string>> panels = {
         {"longest_wait", "longest_work"},

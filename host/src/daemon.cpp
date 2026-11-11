@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <memory>
 #include <poll.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -16,6 +17,7 @@
 #include "commands.hpp"
 #include "composer.hpp"
 #include "config.hpp"
+#include "feed.hpp"
 #include "json.hpp"
 #include "platform.hpp"
 #include "serial.hpp"
@@ -62,8 +64,43 @@ int bind_socket(const std::string& path) {
     return fd;
 }
 
+std::string short_hostname() {
+    char h[256] = {};
+    if (gethostname(h, sizeof h - 1) != 0) return "unknown";
+    std::string s = h;
+    if (size_t dot = s.find('.'); dot != std::string::npos) s.resize(dot);
+    return s;
+}
+
+using Remotes = std::vector<std::unique_ptr<feed::Remote>>;
+
+// Feed endpoints from the config. A remote pointing at our own broadcast port
+// would show every session twice, so it is skipped.
+Remotes make_remotes(const Config& cfg) {
+    Remotes out;
+    for (const auto& r : cfg.remotes) {
+        auto rem = std::make_unique<feed::Remote>(r);
+        const std::string port = r.substr(r.rfind(':') == std::string::npos ? 0 : r.rfind(':') + 1);
+        if (cfg.broadcast_port > 0 && atoi(port.c_str()) == cfg.broadcast_port) {
+            logf("remotes: skipping %s (that's this daemon's own broadcast port)", r.c_str());
+            continue;
+        }
+        out.push_back(std::move(rem));
+    }
+    return out;
+}
+
+void start_broadcast(feed::Server& server, const Config& cfg) {
+    server.close_all();
+    if (cfg.broadcast_port <= 0) return;
+    if (server.listen(cfg.broadcast_port))
+        logf("broadcasting sessions on 127.0.0.1:%d", cfg.broadcast_port);
+    else
+        logf("cannot broadcast on 127.0.0.1:%d: %s", cfg.broadcast_port, strerror(errno));
+}
+
 std::string status_json(const Tracker& t, const SerialLink& link, const PanelText panels[4], int64_t now,
-                        bool starry) {
+                        bool starry, const Remotes& remotes, const feed::Server& server) {
     json::Value root = json::Value::object();
     root["updated"] = json::Value::number((long long)plat::wall_ms());
     root["device"] = json::Value::string(link.is_open() ? link.path() : "");
@@ -101,6 +138,27 @@ std::string status_json(const Tracker& t, const SerialLink& link, const PanelTex
         arr.push(std::move(o));
     }
     root["sessions"] = std::move(arr);
+
+    root["broadcast_clients"] = json::Value::number((long long)server.clients());
+    json::Value rs = json::Value::array();
+    for (const auto& r : remotes) {
+        json::Value o = json::Value::object();
+        o["target"] = json::Value::string(r->target());
+        o["host"] = json::Value::string(r->host());
+        o["live"] = json::Value::boolean(r->live(now));
+        json::Value ss = json::Value::array();
+        for (const ViewSession& s : r->view(now).sessions) {
+            json::Value so = json::Value::object();
+            so["state"] = json::Value::string(state_name(s.state));
+            if (s.state == SessState::Waiting)
+                so["wait"] = json::Value::string(s.wait == WaitKind::Permission ? "permission" : "turn_end");
+            so["in_state_ms"] = json::Value::number((long long)s.in_state_ms);
+            ss.push(std::move(so));
+        }
+        o["sessions"] = std::move(ss);
+        rs.push(std::move(o));
+    }
+    root["remotes"] = std::move(rs);
     return root.dump(2) + "\n";
 }
 
@@ -152,6 +210,11 @@ int cmd_daemon(int argc, char** argv) {
     }
     logf("agent-indicator daemon started (socket %s)", plat::socket_path().c_str());
 
+    const std::string host = short_hostname();
+    feed::Server server;
+    start_broadcast(server, cfg);
+    Remotes remotes = make_remotes(cfg);
+
     SerialLink link;
     uint32_t seq = 0;
     std::string last_body;
@@ -167,6 +230,8 @@ int cmd_daemon(int argc, char** argv) {
             cfg = Config::load(&warnings);
             if (!warnings.empty()) logf("%s", warnings.c_str());
             logf("config reloaded (tracker timeouts apply after restart)");
+            start_broadcast(server, cfg);
+            remotes = make_remotes(cfg);
             if (link.is_open()) {
                 link.send_line("B " + std::to_string(cfg.brightness));
                 link.send_line("L " + std::to_string(cfg.current_budget_ma));
@@ -186,9 +251,11 @@ int cmd_daemon(int argc, char** argv) {
         }
 
         // --- wait for hooks / device input
-        pollfd fds[2] = {{sock, POLLIN, 0}, {link.fd(), POLLIN, 0}};
-        const int nfds = link.is_open() ? 2 : 1;
-        poll(fds, (nfds_t)nfds, 250);
+        // fds[0] hooks, fds[1] device (or -1: ignored), then broadcast + feeds
+        std::vector<pollfd> fds = {{sock, POLLIN, 0}, {link.is_open() ? link.fd() : -1, POLLIN, 0},
+                                   {server.fd(), POLLIN, 0}};
+        for (const auto& r : remotes) fds.push_back({r->fd(), POLLIN, 0});
+        poll(fds.data(), (nfds_t)fds.size(), 250);
         now = plat::mono_ms();
 
         bool changed = false;
@@ -215,9 +282,16 @@ int cmd_daemon(int argc, char** argv) {
                 }
             }
         }
-        if (link.is_open() && nfds == 2 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (link.is_open() && fds[1].fd >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
             for (const auto& l : link.read_lines()) logf("device: %s", l.c_str());
             if (!link.is_open()) logf("device disconnected");
+        }
+
+        // --- feeds: new listeners, data from other machines
+        if (fds[2].revents & POLLIN) server.accept_pending();
+        for (auto& r : remotes) {
+            if (r->poll(now)) changed = true;
+            for (const auto& l : r->take_log()) logf("%s", l.c_str());
         }
 
         // --- housekeeping once per second
@@ -227,7 +301,11 @@ int cmd_daemon(int argc, char** argv) {
                 tracker.tick(now, plat::proc_alive);
                 last_tick = now;
             }
-            const std::string body = composer.compose(tracker, now, panels);
+            View view = make_view(tracker, now);
+            if (server.clients()) server.publish(feed::encode(view, host));   // our sessions only
+            for (const auto& r : remotes)
+                if (r->live(now)) merge_view(view, r->view(now));
+            const std::string body = composer.compose(view, now, panels);
             if (link.is_open() && (body != last_body || now - last_send >= 1000)) {
                 if (link.send_line("F " + std::to_string(++seq) + " " + body)) {
                     if (g_verbose && body != last_body) logf("frame %s", body.c_str());
@@ -240,7 +318,8 @@ int cmd_daemon(int argc, char** argv) {
             if (body != last_status_body || now - last_status >= 5000) {
                 last_status_body = body;
                 plat::write_file_atomic(sdir + "/status.json",
-                                        status_json(tracker, link, panels, now, composer.screensaver(tracker, now)));
+                                        status_json(tracker, link, panels, now, composer.screensaver(view),
+                                                    remotes, server));
                 last_status = now;
             }
         }

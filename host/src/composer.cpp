@@ -36,17 +36,41 @@ std::string dur_label(const char* what, int64_t ms) {
 
 }  // namespace
 
-bool Composer::page(const std::string& name, const Tracker& t, const DayMetrics& m, int64_t now,
-                    PanelText& out) const {
+View make_view(const Tracker& t, int64_t now) {
+    View v;
+    for (const Session* s : t.ordered())
+        v.sessions.push_back({s->state, s->wait, now - s->state_since, now - s->work_since});
+    v.day = t.live_metrics(now);
+    v.actions_per_min = t.actions_per_min(now);
+    v.inactive_ms = now - t.last_activity();
+    return v;
+}
+
+void merge_view(View& into, const View& o) {
+    into.sessions.insert(into.sessions.end(), o.sessions.begin(), o.sessions.end());
+    into.day.agent_work_ms += o.day.agent_work_ms;
+    into.day.busy_wall_ms += o.day.busy_wall_ms;   // upper bound: machines may overlap
+    into.day.wait_total_ms += o.day.wait_total_ms;
+    into.day.wait_count += o.day.wait_count;
+    into.day.idle_total_ms += o.day.idle_total_ms;
+    into.day.idle_count += o.day.idle_count;
+    into.day.tool_calls += o.day.tool_calls;
+    into.day.sessions_started += o.day.sessions_started;
+    into.actions_per_min += o.actions_per_min;
+    into.inactive_ms = std::min(into.inactive_ms, o.inactive_ms);
+}
+
+bool Composer::page(const std::string& name, const View& v, PanelText& out) const {
+    const DayMetrics& m = v.day;
     auto longest = [&](SessState st, bool streak) -> int64_t {
         int64_t best = -1;
-        for (const Session* s : t.ordered())
-            if (s->state == st) best = std::max(best, now - (streak ? s->work_since : s->state_since));
+        for (const ViewSession& s : v.sessions)
+            if (s.state == st) best = std::max(best, streak ? s.streak_ms : s.in_state_ms);
         return best;
     };
     auto count = [&](SessState st) {
         int n = 0;
-        for (const Session* s : t.ordered()) n += s->state == st;
+        for (const ViewSession& s : v.sessions) n += s.state == st;
         return n;
     };
 
@@ -71,14 +95,14 @@ bool Composer::page(const std::string& name, const Tracker& t, const DayMetrics&
         int64_t ms = m.idle_total_ms / m.idle_count;
         out = {dur_token(ms, 'r'), dur_label("avg idle", ms)};
     } else if (name == "actions_rate") {
-        double r = t.actions_per_min(now);
+        double r = v.actions_per_min;
         if (r <= 0.0) return false;
         int v = (int)std::lround(r);
         if (v < 1) v = 1;
         out = {token(v, 'n', 'm'), "actions/min " + std::to_string(v)};
     } else if (name == "sessions") {
         int n = 0;
-        for (const Session* s : t.ordered()) n += s->state != SessState::Done;
+        for (const ViewSession& s : v.sessions) n += s.state != SessState::Done;
         if (!n) return false;
         out = {token(n, 'n', 'x'), "sessions " + std::to_string(n)};
     } else if (name == "working" || name == "waiting") {
@@ -91,20 +115,19 @@ bool Composer::page(const std::string& name, const Tracker& t, const DayMetrics&
     return true;
 }
 
-bool Composer::screensaver(const Tracker& t, int64_t now) const {
-    for (const Session* s : t.ordered())
-        if (s->state != SessState::Idle) return false;
-    return now - t.last_activity() >= (int64_t)cfg_.screensaver_min * 60'000;
+bool Composer::screensaver(const View& v) const {
+    for (const ViewSession& s : v.sessions)
+        if (s.state != SessState::Idle) return false;
+    return v.inactive_ms >= (int64_t)cfg_.screensaver_min * 60'000;
 }
 
-std::string Composer::compose(const Tracker& t, int64_t now, PanelText out_panels[4]) const {
-    const DayMetrics m = t.live_metrics(now);
-    const bool starry = screensaver(t, now);
+std::string Composer::compose(const View& v, int64_t now, PanelText out_panels[4]) const {
+    const bool starry = screensaver(v);
 
     std::string bar;
-    for (const Session* s : t.ordered()) {
+    for (const ViewSession& s : v.sessions) {
         if (bar.size() >= 40) { bar += '+'; break; }
-        switch (s->state) {
+        switch (s.state) {
         case SessState::Working: bar += 'W'; break;
         case SessState::Waiting: bar += 'Y'; break;
         case SessState::Idle: bar += 'I'; break;
@@ -123,7 +146,7 @@ std::string Composer::compose(const Tracker& t, int64_t now, PanelText out_panel
         std::vector<PanelText> avail;
         for (const auto& name : pages) {
             PanelText pt;
-            if (page(name, t, m, now, pt)) avail.push_back(pt);
+            if (page(name, v, pt)) avail.push_back(pt);
         }
         if (!avail.empty()) chosen = avail[(size_t)(beat % (int64_t)avail.size())];
         out_panels[p] = chosen;

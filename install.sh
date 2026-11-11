@@ -46,8 +46,8 @@ if command -v cmake >/dev/null 2>&1; then
 else
   say "Building with $CXX (no CMake found)"
   mkdir -p "$BUILD"
-  core=("$ROOT"/host/src/{json,platform,tracker,composer,config,serial}.cpp)
-  "$CXX" -std=c++17 -O2 -Wall -I"$ROOT/host/src" -DAGENT_INDICATOR_VERSION='"1.0.0"' \
+  core=("$ROOT"/host/src/{json,platform,tracker,composer,config,serial,feed}.cpp)
+  "$CXX" -std=c++17 -O2 -Wall -I"$ROOT/host/src" -DAGENT_INDICATOR_VERSION='"1.1.0"' \
     "${core[@]}" "$ROOT"/host/src/{main,hook,daemon,install}.cpp -o "$BUILD/agent-indicator"
   "$CXX" -std=c++17 -O1 -I"$ROOT/host/src" "${core[@]}" "$ROOT/host/tests/tests.cpp" -o "$BUILD/agentind_tests"
 fi
